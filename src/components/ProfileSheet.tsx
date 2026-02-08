@@ -1,19 +1,20 @@
 import { Ionicons } from '@expo/vector-icons';
-import { ReactNode, useEffect, useRef, useState } from 'react';
+import { ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import {
-    Animated,
-    Easing,
-    Modal,
-    Pressable,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TouchableOpacity,
-    View,
-    useWindowDimensions,
+  Animated,
+  Easing,
+  Modal,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+  useWindowDimensions,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { capture } from '@/analytics/posthog';
 import { spacing } from '@/utils/spacing';
 
 type ProfileSheetProps = {
@@ -55,13 +56,38 @@ const legalRows: ListRow[] = [
   { key: 'terms', label: 'Terms of Use', icon: 'document-text-outline' },
 ];
 
-export default function ProfileSheet({ visible, onClose }: ProfileSheetProps) {
+function ProfileSheet({ visible, onClose }: ProfileSheetProps) {
   const [rendered, setRendered] = useState(visible);
   const backdropOpacity = useRef(new Animated.Value(0)).current;
   const translateY = useRef(new Animated.Value(1)).current;
   const { height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const sheetHeight = height * 0.88;
+
+  useEffect(() => {
+    if (visible) {
+      capture('profile_opened');
+    }
+  }, [visible]);
+
+  const handleClose = useCallback(
+    (method: 'backdrop' | 'close_button') => {
+      capture('profile_closed', { method });
+      onClose();
+    },
+    [onClose]
+  );
+
+  const handlePremiumPress = useCallback(() => {
+    capture('paywall_open_requested', { source: 'profile_unlock_card' });
+  }, []);
+
+  const handleSettingsPress = useCallback((key: string) => {
+    capture('profile_setting_tapped', { itemKey: key });
+    if (key === 'favorites') {
+      capture('favorites_open_requested');
+    }
+  }, []);
 
   useEffect(() => {
     if (visible) {
@@ -113,10 +139,6 @@ export default function ProfileSheet({ visible, onClose }: ProfileSheetProps) {
     }
   }, [backdropOpacity, rendered, translateY, visible]);
 
-  const handleRowPress = (key: string) => {
-    console.log(`Pressed ${key}`);
-  };
-
   if (!rendered) {
     return null;
   }
@@ -127,10 +149,15 @@ export default function ProfileSheet({ visible, onClose }: ProfileSheetProps) {
   });
 
   return (
-    <Modal transparent animationType="none" visible={rendered} onRequestClose={onClose}>
+    <Modal
+      transparent
+      animationType="none"
+      visible={rendered}
+      onRequestClose={() => handleClose('backdrop')}
+    >
       <View style={styles.modalRoot}>
         <Animated.View style={[styles.backdrop, { opacity: backdropOpacity }]}>
-          <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => handleClose('backdrop')} />
         </Animated.View>
 
         <Animated.View
@@ -148,11 +175,11 @@ export default function ProfileSheet({ visible, onClose }: ProfileSheetProps) {
                 styles.content,
                 { paddingBottom: insets.bottom + spacing(8) },
               ]}>
-              {renderHeader(onClose)}
+              {renderHeader(() => handleClose('close_button'))}
               {renderMascotBadge()}
-              {renderPremiumCard()}
+              {renderPremiumCard(handlePremiumPress)}
               {renderStreakCard()}
-              {renderSection('Settings', renderSettingsRows())}
+              {renderSection('Settings', renderSettingsRows(handleSettingsPress))}
               {renderSection('Legal', renderLegalRows())}
               <Text style={styles.footerText}>v0.1.0 (dev)</Text>
             </ScrollView>
@@ -163,10 +190,12 @@ export default function ProfileSheet({ visible, onClose }: ProfileSheetProps) {
   );
 }
 
-function renderHeader(onClose: () => void) {
+export default ProfileSheet;
+
+function renderHeader(onClosePress: () => void) {
   return (
     <View style={styles.headerRow}>
-      <TouchableOpacity style={styles.closeButton} onPress={onClose} activeOpacity={0.8}>
+      <TouchableOpacity style={styles.closeButton} onPress={onClosePress} activeOpacity={0.8}>
         <Ionicons name="close" size={22} color={palette.textPrimary} />
       </TouchableOpacity>
       <Text style={styles.headerTitle}>Profile</Text>
@@ -185,12 +214,12 @@ function renderMascotBadge() {
   );
 }
 
-function renderPremiumCard() {
+function renderPremiumCard(onUnlockPress: () => void) {
   return (
     <TouchableOpacity
       activeOpacity={0.85}
       style={styles.premiumCard}
-      onPress={() => console.log('Open paywall')}
+      onPress={onUnlockPress}
     >
       <View style={styles.premiumTextWrapper}>
         <Text style={styles.premiumTitle}>Unlock everything</Text>
@@ -243,12 +272,12 @@ function renderSection(title: string, content: ReactNode) {
   );
 }
 
-function renderSettingsRows() {
+function renderSettingsRows(onRowPress: (key: string) => void) {
   return (
     <View style={styles.cardList}>
       {settingsRows.map((row, index) => (
         <View key={row.key}>
-          <Pressable style={styles.listRow} onPress={() => console.log(`Pressed ${row.key}`)}>
+          <Pressable style={styles.listRow} onPress={() => onRowPress(row.key)}>
             <View style={styles.rowLeft}>
               <View style={styles.rowIconCircle}>
                 <Ionicons name={row.icon} size={18} color={palette.blue} />

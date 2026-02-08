@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { StatusBar } from 'expo-status-bar';
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
     FlatList,
     NativeScrollEvent,
@@ -15,6 +15,7 @@ import {
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { capture, screen } from '@/analytics/posthog';
 import ProfileSheet from '@/components/ProfileSheet';
 import QuoteSlide from '@/components/QuoteSlide';
 import { QUOTES } from '@/data/quotes';
@@ -40,6 +41,18 @@ export default function HomeScreen() {
   const isActiveLiked = activeQuote ? Boolean(likedQuotes[activeQuote.id]) : false;
   const isActiveBookmarked = activeQuote ? Boolean(bookmarkedQuotes[activeQuote.id]) : false;
 
+  useEffect(() => {
+    screen('Home');
+  }, []);
+
+  useEffect(() => {
+    const quote = QUOTES[activeIndex];
+    if (!quote) {
+      return;
+    }
+    capture('quote_viewed', { quoteId: quote.id, index: activeIndex });
+  }, [activeIndex]);
+
   const handleMomentumEnd = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
       const offsetY = event.nativeEvent.contentOffset.y;
@@ -55,10 +68,14 @@ export default function HomeScreen() {
       return;
     }
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    setLikedQuotes((prev) => ({
-      ...prev,
-      [activeQuote.id]: !prev[activeQuote.id],
-    }));
+    setLikedQuotes((prev) => {
+      const nextValue = !prev[activeQuote.id];
+      capture('quote_liked_toggled', { quoteId: activeQuote.id, liked: nextValue });
+      return {
+        ...prev,
+        [activeQuote.id]: nextValue,
+      };
+    });
   }, [activeQuote]);
 
   const toggleBookmark = useCallback(() => {
@@ -66,10 +83,14 @@ export default function HomeScreen() {
       return;
     }
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    setBookmarkedQuotes((prev) => ({
-      ...prev,
-      [activeQuote.id]: !prev[activeQuote.id],
-    }));
+    setBookmarkedQuotes((prev) => {
+      const nextValue = !prev[activeQuote.id];
+      capture('quote_saved_toggled', { quoteId: activeQuote.id, saved: nextValue });
+      return {
+        ...prev,
+        [activeQuote.id]: nextValue,
+      };
+    });
   }, [activeQuote]);
 
   const handleShare = useCallback(() => {
@@ -77,9 +98,23 @@ export default function HomeScreen() {
       return;
     }
     Haptics.selectionAsync();
-    Share.share({
-      message: `${activeQuote.text}\n\nDaily Discipline — Grit`,
-    });
+    void (async () => {
+      try {
+        const result = await Share.share({
+          message: `${activeQuote.text}\n\nDaily Discipline — Grit`,
+        });
+        capture('quote_shared', {
+          quoteId: activeQuote.id,
+          shareResult: result.action,
+          activityType: result.activityType,
+        });
+      } catch (error) {
+        capture('quote_shared', {
+          quoteId: activeQuote.id,
+          error: error instanceof Error ? error.message : 'unknown_error',
+        });
+      }
+    })();
   }, [activeQuote]);
 
   const renderItem = useCallback(({ item }: { item: (typeof QUOTES)[number] }) => <QuoteSlide quote={item} />, []);
