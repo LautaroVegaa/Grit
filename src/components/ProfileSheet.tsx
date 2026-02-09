@@ -1,6 +1,8 @@
 import { Ionicons } from '@expo/vector-icons';
+import { NavigationProp, useNavigation } from '@react-navigation/native';
 import { ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import {
+  Alert,
   Animated,
   Easing,
   Modal,
@@ -15,11 +17,14 @@ import {
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { capture } from '@/analytics/posthog';
+import { useOnboarding } from '@/context/OnboardingContext';
+import { RootStackParamList } from '@/navigation/types';
 import { spacing } from '@/utils/spacing';
 
 type ProfileSheetProps = {
   visible: boolean;
   onClose: () => void;
+  onFavoritesPress?: () => void;
 };
 
 type ListRow = {
@@ -56,7 +61,9 @@ const legalRows: ListRow[] = [
   { key: 'terms', label: 'Terms of Use', icon: 'document-text-outline' },
 ];
 
-function ProfileSheet({ visible, onClose }: ProfileSheetProps) {
+function ProfileSheet({ visible, onClose, onFavoritesPress }: ProfileSheetProps) {
+  const navigation = useNavigation<NavigationProp<RootStackParamList>>();
+  const { resetOnboarding, forceOnboarding, updateForceOnboarding } = useOnboarding();
   const [rendered, setRendered] = useState(visible);
   const backdropOpacity = useRef(new Animated.Value(0)).current;
   const translateY = useRef(new Animated.Value(1)).current;
@@ -82,12 +89,45 @@ function ProfileSheet({ visible, onClose }: ProfileSheetProps) {
     capture('paywall_open_requested', { source: 'profile_unlock_card' });
   }, []);
 
-  const handleSettingsPress = useCallback((key: string) => {
-    capture('profile_setting_tapped', { itemKey: key });
-    if (key === 'favorites') {
-      capture('favorites_open_requested');
+  const handleSettingsPress = useCallback(
+    (key: string) => {
+      capture('profile_setting_tapped', { itemKey: key });
+      if (key === 'favorites') {
+        capture('favorites_open_requested');
+        handleClose('close_button');
+        onFavoritesPress?.();
+      }
+    },
+    [handleClose, onFavoritesPress]
+  );
+
+  const handleReplayOnboarding = useCallback(() => {
+    capture('onboarding_replay_prompted_from_profile');
+    Alert.alert('Replay onboarding?', 'This will reset your onboarding answers.', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Replay',
+        style: 'destructive',
+        onPress: () => {
+          capture('onboarding_replay_confirmed');
+          void (async () => {
+            await resetOnboarding();
+            navigation.reset({ index: 0, routes: [{ name: 'Onboarding' }] });
+            handleClose('close_button');
+          })();
+        },
+      },
+    ]);
+  }, [handleClose, navigation, resetOnboarding]);
+
+  const handleForceToggle = useCallback(() => {
+    if (!__DEV__) {
+      return;
     }
-  }, []);
+    const next = !forceOnboarding;
+    capture('onboarding_force_toggle_changed', { next });
+    void updateForceOnboarding(next);
+  }, [forceOnboarding, updateForceOnboarding]);
 
   useEffect(() => {
     if (visible) {
@@ -179,8 +219,9 @@ function ProfileSheet({ visible, onClose }: ProfileSheetProps) {
               {renderMascotBadge()}
               {renderPremiumCard(handlePremiumPress)}
               {renderStreakCard()}
-              {renderSection('Settings', renderSettingsRows(handleSettingsPress))}
+              {renderSection('Settings', renderSettingsRows(handleSettingsPress, renderReplayRow(handleReplayOnboarding)))}
               {renderSection('Legal', renderLegalRows())}
+              {__DEV__ ? renderSection('Developer', renderDeveloperRows(forceOnboarding, handleForceToggle)) : null}
               <Text style={styles.footerText}>v0.1.0 (dev)</Text>
             </ScrollView>
           </SafeAreaView>
@@ -272,7 +313,7 @@ function renderSection(title: string, content: ReactNode) {
   );
 }
 
-function renderSettingsRows(onRowPress: (key: string) => void) {
+function renderSettingsRows(onRowPress: (key: string) => void, extraRows?: ReactNode) {
   return (
     <View style={styles.cardList}>
       {settingsRows.map((row, index) => (
@@ -292,6 +333,43 @@ function renderSettingsRows(onRowPress: (key: string) => void) {
           {index < settingsRows.length - 1 ? <View style={styles.rowDivider} /> : null}
         </View>
       ))}
+      {extraRows}
+    </View>
+  );
+}
+
+function renderReplayRow(onReplay: () => void) {
+  return (
+    <>
+      <View style={styles.rowDivider} />
+      <Pressable style={styles.listRow} onPress={onReplay}>
+        <View style={styles.rowLeft}>
+          <View style={styles.rowIconCircle}>
+            <Ionicons name="refresh-outline" size={18} color={palette.blue} />
+          </View>
+          <Text style={styles.rowLabel}>Replay onboarding</Text>
+        </View>
+        <Ionicons name="chevron-forward" size={16} color={palette.textSecondary} />
+      </Pressable>
+    </>
+  );
+}
+
+function renderDeveloperRows(forceOnboarding: boolean, onToggle: () => void) {
+  return (
+    <View style={styles.cardList}>
+      <Pressable style={styles.listRow} onPress={onToggle}>
+        <View style={styles.rowLeft}>
+          <View style={styles.rowIconCircle}>
+            <Ionicons name="build-outline" size={18} color={palette.blue} />
+          </View>
+          <Text style={styles.rowLabel}>Force onboarding on next launch</Text>
+        </View>
+        <View style={styles.rowRight}>
+          <Text style={styles.rowValue}>{forceOnboarding ? 'On' : 'Off'}</Text>
+          <Ionicons name="chevron-forward" size={16} color={palette.textSecondary} />
+        </View>
+      </Pressable>
     </View>
   );
 }

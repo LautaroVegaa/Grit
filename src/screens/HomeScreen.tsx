@@ -1,7 +1,9 @@
 import { Ionicons } from '@expo/vector-icons';
+import { useFocusEffect } from '@react-navigation/native';
+import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import * as Haptics from 'expo-haptics';
 import { StatusBar } from 'expo-status-bar';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
     FlatList,
     NativeScrollEvent,
@@ -16,9 +18,13 @@ import {
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { capture, screen } from '@/analytics/posthog';
+import { CategoriesSheet } from '@/components/CategoriesSheet';
 import ProfileSheet from '@/components/ProfileSheet';
 import QuoteSlide from '@/components/QuoteSlide';
-import { QUOTES } from '@/data/quotes';
+import { CATEGORIES, DEFAULT_CATEGORY_KEY } from '@/data/categories';
+import { QUOTES, Quote } from '@/data/quotes';
+import { MainStackParamList } from '@/navigation/types';
+import { loadPreferences, saveBookmarked, saveLiked, saveSelectedCategories } from '@/storage/preferences';
 import { colors } from '@/theme/colors';
 import { spacing } from '@/utils/spacing';
 
@@ -29,38 +35,90 @@ type ActionButton = {
   active?: boolean;
 };
 
-export default function HomeScreen() {
+type Props = NativeStackScreenProps<MainStackParamList, 'Home'>;
+
+export default function HomeScreen({ navigation }: Props) {
   const [activeIndex, setActiveIndex] = useState(0);
   const [likedQuotes, setLikedQuotes] = useState<Record<string, boolean>>({});
   const [bookmarkedQuotes, setBookmarkedQuotes] = useState<Record<string, boolean>>({});
+  const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
+  const [isCategoriesOpen, setIsCategoriesOpen] = useState(false);
   const { height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
+  const hasRefreshedOnFocus = useRef(false);
 
-  const activeQuote = QUOTES[activeIndex];
+  const filteredQuotes = useMemo(() => {
+    if (selectedCategories.length === 0) {
+      return QUOTES;
+    }
+    const selectedSet = new Set(selectedCategories);
+    return QUOTES.filter((quote) => {
+      const categories = quote.categories?.length ? quote.categories : [DEFAULT_CATEGORY_KEY];
+      return categories.some((category) => selectedSet.has(category));
+    });
+  }, [selectedCategories]);
+
+  const activeQuote = filteredQuotes[activeIndex];
   const isActiveLiked = activeQuote ? Boolean(likedQuotes[activeQuote.id]) : false;
   const isActiveBookmarked = activeQuote ? Boolean(bookmarkedQuotes[activeQuote.id]) : false;
+
+  const hydratePreferences = useCallback(async () => {
+    const preferences = await loadPreferences();
+    setLikedQuotes(preferences.liked ?? {});
+    setBookmarkedQuotes(preferences.bookmarked ?? {});
+    setSelectedCategories(preferences.selectedCategories ?? []);
+  }, []);
 
   useEffect(() => {
     screen('Home');
   }, []);
 
   useEffect(() => {
-    const quote = QUOTES[activeIndex];
+    void hydratePreferences();
+  }, [hydratePreferences]);
+
+  useFocusEffect(
+    useCallback(() => {
+      if (!hasRefreshedOnFocus.current) {
+        hasRefreshedOnFocus.current = true;
+        return undefined;
+      }
+      void hydratePreferences();
+      return undefined;
+    }, [hydratePreferences])
+  );
+
+  useEffect(() => {
+    const quote = filteredQuotes[activeIndex];
     if (!quote) {
       return;
     }
-    capture('quote_viewed', { quoteId: quote.id, index: activeIndex });
-  }, [activeIndex]);
+    capture('quote_viewed', {
+      quoteId: quote.id,
+      index: activeIndex,
+      activeCategories: selectedCategories,
+      selectionCount: selectedCategories.length,
+    });
+  }, [activeIndex, filteredQuotes, selectedCategories]);
+
+  useEffect(() => {
+    setActiveIndex((prev) => {
+      if (filteredQuotes.length === 0) {
+        return 0;
+      }
+      return Math.min(prev, filteredQuotes.length - 1);
+    });
+  }, [filteredQuotes.length]);
 
   const handleMomentumEnd = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
       const offsetY = event.nativeEvent.contentOffset.y;
       const nextIndex = Math.round(offsetY / height);
-      const clampedIndex = Math.max(0, Math.min(nextIndex, QUOTES.length - 1));
+      const clampedIndex = Math.max(0, Math.min(nextIndex, filteredQuotes.length - 1));
       setActiveIndex(clampedIndex);
     },
-    [height]
+    [filteredQuotes.length, height]
   );
 
   const toggleLike = useCallback(() => {
@@ -71,10 +129,14 @@ export default function HomeScreen() {
     setLikedQuotes((prev) => {
       const nextValue = !prev[activeQuote.id];
       capture('quote_liked_toggled', { quoteId: activeQuote.id, liked: nextValue });
-      return {
-        ...prev,
-        [activeQuote.id]: nextValue,
-      };
+      const next = { ...prev };
+      if (nextValue) {
+        next[activeQuote.id] = true;
+      } else {
+        delete next[activeQuote.id];
+      }
+      void saveLiked(next);
+      return next;
     });
   }, [activeQuote]);
 
@@ -86,10 +148,14 @@ export default function HomeScreen() {
     setBookmarkedQuotes((prev) => {
       const nextValue = !prev[activeQuote.id];
       capture('quote_saved_toggled', { quoteId: activeQuote.id, saved: nextValue });
-      return {
-        ...prev,
-        [activeQuote.id]: nextValue,
-      };
+      const next = { ...prev };
+      if (nextValue) {
+        next[activeQuote.id] = true;
+      } else {
+        delete next[activeQuote.id];
+      }
+      void saveBookmarked(next);
+      return next;
     });
   }, [activeQuote]);
 
@@ -105,19 +171,56 @@ export default function HomeScreen() {
         });
         capture('quote_shared', {
           quoteId: activeQuote.id,
+          source: 'home',
           shareResult: result.action,
           activityType: result.activityType,
         });
       } catch (error) {
         capture('quote_shared', {
           quoteId: activeQuote.id,
+          source: 'home',
           error: error instanceof Error ? error.message : 'unknown_error',
         });
       }
     })();
   }, [activeQuote]);
 
-  const renderItem = useCallback(({ item }: { item: (typeof QUOTES)[number] }) => <QuoteSlide quote={item} />, []);
+  const handleFavoritesNavigation = useCallback(() => {
+    navigation.navigate('Favorites');
+  }, [navigation]);
+
+  const handleOpenCategories = useCallback(() => {
+    capture('categories_opened');
+    setIsCategoriesOpen(true);
+  }, []);
+
+  const handleCloseCategories = useCallback(() => {
+    capture('categories_closed', { selectedCount: selectedCategories.length });
+    setIsCategoriesOpen(false);
+  }, [selectedCategories.length]);
+
+  const handleToggleCategory = useCallback((key: string) => {
+    setSelectedCategories((prev) => {
+      const exists = prev.includes(key);
+      const next = exists ? prev.filter((item) => item !== key) : [...prev, key];
+      capture('categories_changed', { selected: next, count: next.length });
+      void saveSelectedCategories(next);
+      return next;
+    });
+  }, []);
+
+  const handleClearCategories = useCallback(() => {
+    setSelectedCategories((prev) => {
+      if (prev.length === 0) {
+        return prev;
+      }
+      capture('categories_changed', { selected: [], count: 0 });
+      void saveSelectedCategories([]);
+      return [];
+    });
+  }, []);
+
+  const renderItem = useCallback(({ item }: { item: Quote }) => <QuoteSlide quote={item} />, []);
 
   const getItemLayout = useCallback(
     (_: unknown, index: number) => ({ length: height, offset: height * index, index }),
@@ -145,7 +248,7 @@ export default function HomeScreen() {
       <StatusBar style="light" translucent />
       <View style={styles.listWrapper}>
         <FlatList
-          data={QUOTES}
+          data={filteredQuotes}
           keyExtractor={(item) => item.id}
           renderItem={renderItem}
           pagingEnabled
@@ -156,6 +259,13 @@ export default function HomeScreen() {
           showsVerticalScrollIndicator={false}
           getItemLayout={getItemLayout}
           bounces={false}
+          ListEmptyComponent={
+            <View style={styles.emptyState}>
+              <Ionicons name="alert-circle-outline" size={34} color={colors.textMuted} />
+              <Text style={styles.emptyTitle}>No quotes in these categories</Text>
+              <Text style={styles.emptySubtitle}>Try Mix or choose another set.</Text>
+            </View>
+          }
         />
       </View>
 
@@ -171,8 +281,12 @@ export default function HomeScreen() {
 
           <Text style={styles.brandText}>GRIT</Text>
 
-          <TouchableOpacity style={styles.topIconButton} activeOpacity={0.8}>
-            <Ionicons name="help-circle-outline" size={22} color={colors.text} />
+          <TouchableOpacity
+            style={styles.topIconButton}
+            activeOpacity={0.8}
+            onPress={handleOpenCategories}
+          >
+            <Ionicons name="funnel-outline" size={22} color={colors.text} />
           </TouchableOpacity>
         </View>
       </SafeAreaView>
@@ -190,7 +304,20 @@ export default function HomeScreen() {
         ))}
       </View>
 
-      <ProfileSheet visible={isProfileOpen} onClose={() => setIsProfileOpen(false)} />
+      <ProfileSheet
+        visible={isProfileOpen}
+        onClose={() => setIsProfileOpen(false)}
+        onFavoritesPress={handleFavoritesNavigation}
+      />
+
+      <CategoriesSheet
+        visible={isCategoriesOpen}
+        categories={CATEGORIES}
+        selected={selectedCategories}
+        onToggle={handleToggleCategory}
+        onClear={handleClearCategories}
+        onClose={handleCloseCategories}
+      />
     </View>
   );
 }
@@ -258,5 +385,23 @@ const styles = StyleSheet.create({
     height: 64,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  emptyState: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: spacing(6),
+    gap: spacing(2.5),
+  },
+  emptyTitle: {
+    color: colors.text,
+    fontSize: 18,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  emptySubtitle: {
+    color: colors.textMuted,
+    fontSize: 14,
+    textAlign: 'center',
   },
 });
