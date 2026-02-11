@@ -1,16 +1,16 @@
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
-import {
-  AccessibilityInfo,
-  Animated,
-  Easing,
-  Image,
-  Pressable,
-  StyleSheet,
-  Text,
-  View,
-  useWindowDimensions,
-} from 'react-native';
 import { useEffect, useRef } from 'react';
+import {
+    AccessibilityInfo,
+    Animated,
+    Easing,
+    Image,
+    Pressable,
+    StyleSheet,
+    Text,
+    View,
+    useWindowDimensions,
+} from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { capture, screen as trackScreen } from '@/analytics/posthog';
@@ -192,6 +192,7 @@ export function IntroScreen({ navigation }: IntroScreenProps) {
     mascotOpacity,
     mascotScale,
     mascotTranslateY,
+    mascotRotate,
     titleOpacity,
     titleTranslateY,
     sub1Opacity,
@@ -282,7 +283,7 @@ export function IntroScreen({ navigation }: IntroScreenProps) {
             style={({ pressed }) => [styles.primaryButton, pressed && styles.primaryPressed]}
             onPress={handleContinue}
           >
-            <Text style={styles.primaryLabel}>Let's get started</Text>
+            <Text style={styles.primaryLabel}>Let&apos;s get started</Text>
           </Pressable>
         </Animated.View>
       </View>

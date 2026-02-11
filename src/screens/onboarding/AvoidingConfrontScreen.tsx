@@ -54,7 +54,7 @@ export function AvoidingConfrontScreen({ navigation }: AvoidingConfrontScreenPro
       progress={ONBOARDING_PROGRESS.OnboardingAvoidingConfront}
       mascotHero
     >
-      <Text style={styles.lede}>We'll tackle it head-on.</Text>
+      <Text style={styles.lede}>We&apos;ll tackle it head-on.</Text>
       <View style={styles.stack}>
         {AVOIDING_CONFRONT_OPTIONS.map((option) => (
           <OptionCard

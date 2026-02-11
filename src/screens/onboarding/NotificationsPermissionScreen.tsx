@@ -62,7 +62,7 @@ export function NotificationsPermissionScreen({ navigation }: NotificationsPermi
       duration: 420,
       useNativeDriver: true,
     }).start();
-  }, []);
+  }, [cardAnim]);
 
   useFocusEffect(
     useCallback(() => {
@@ -164,6 +164,11 @@ export function NotificationsPermissionScreen({ navigation }: NotificationsPermi
     ],
   } as const;
 
+  const helperCopy =
+    permissionState === 'denied'
+      ? 'Notifications are off for now. You can change this anytime in Settings.'
+      : 'You can change this anytime in Settings.';
+
   return (
     <OnboardingShell
       title="Stay on plan with reminders."
@@ -179,7 +184,7 @@ export function NotificationsPermissionScreen({ navigation }: NotificationsPermi
             <View style={styles.mockIcon} />
           </View>
           <View style={styles.mockHeaderText}>
-            <Text style={styles.mockTitle}>"GRIT" Would Like to Send You Notifications</Text>
+            <Text style={styles.mockTitle}>&quot;GRIT&quot; Would Like to Send You Notifications</Text>
             <Text style={styles.mockBody}>Notifications may include alerts, sounds, and icon badges.</Text>
           </View>
         </View>
@@ -192,9 +197,9 @@ export function NotificationsPermissionScreen({ navigation }: NotificationsPermi
             ]}
             onPress={handleDontAllow}
             accessibilityRole="button"
-            accessibilityLabel="Don't allow notifications"
+            accessibilityLabel="Don&apos;t allow notifications"
           >
-            <Text style={styles.mockButtonSecondaryLabel}>Don't Allow</Text>
+            <Text style={styles.mockButtonSecondaryLabel}>Don&apos;t Allow</Text>
           </Pressable>
           <Pressable
             style={({ pressed }) => [
@@ -213,7 +218,7 @@ export function NotificationsPermissionScreen({ navigation }: NotificationsPermi
       </Animated.View>
 
       <Animated.Text style={[styles.helperNote, helperStyle]}>
-        You can change this anytime in Settings.
+        {helperCopy}
       </Animated.Text>
     </OnboardingShell>
   );

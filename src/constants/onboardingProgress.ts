@@ -5,7 +5,7 @@ export type OnboardingSectionKey = 'identity' | 'goals' | 'setup';
 type SectionDefinition = {
   key: OnboardingSectionKey;
   label: string;
-  routes: Array<keyof OnboardingStackParamList>;
+  routes: (keyof OnboardingStackParamList)[];
 };
 
 const SECTION_DEFINITIONS: SectionDefinition[] = [
@@ -66,7 +66,7 @@ const SECTION_DEFINITIONS: SectionDefinition[] = [
 
 export const ONBOARDING_SECTION_LABELS = SECTION_DEFINITIONS.map((section) => section.label);
 
-const STEP_ORDER: Array<keyof OnboardingStackParamList> = SECTION_DEFINITIONS.flatMap((section) => section.routes);
+const STEP_ORDER: (keyof OnboardingStackParamList)[] = SECTION_DEFINITIONS.flatMap((section) => section.routes);
 
 export const TOTAL_ONBOARDING_STEPS = STEP_ORDER.length;
 

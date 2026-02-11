@@ -1,0 +1,12 @@
+export const ACTIVE_CATEGORIES = 'grit.activeCategories.v1';
+export const PHRASE_HISTORY = 'grit.phraseHistory.v1';
+export const PHRASE_PACK_VERSION = 'grit.phrasePackVersion.v1';
+export const REMINDERS_PER_DAY = 'grit.remindersPerDay.v1';
+export const LAST_COMMITTED_DROPS_KEY = 'grit.lastCommittedDropsKey.v1';
+export const TRAINING_TIME_PREFERENCE = 'grit.trainingTime.v1';
+export const SCHEDULED_NOTIFICATION_IDS = 'grit.scheduledNotifIds.v1';
+export const LAST_SCHEDULED_DROPS_KEY = 'grit.lastScheduledKey.v1';
+export const LIKED_PHRASES = 'grit.likedPhrases.v1';
+export const SAVED_PHRASES = 'grit.savedPhrases.v1';
+export const STREAK_STATE = 'grit.streakState.v1';
+export const STREAK_MODAL_LAST_SHOWN_DATE = 'grit.streakModal.lastShownDate.v1';

@@ -5,24 +5,24 @@ import * as Haptics from 'expo-haptics';
 import { StatusBar } from 'expo-status-bar';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-    FlatList,
-    NativeScrollEvent,
-    NativeSyntheticEvent,
-    Share,
-    StyleSheet,
-    Text,
-    TouchableOpacity,
-    View,
-    useWindowDimensions,
+  ActivityIndicator,
+  FlatList,
+  FlatListProps,
+  Share,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+  useWindowDimensions,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { capture, screen } from '@/analytics/posthog';
 import { CategoriesSheet } from '@/components/CategoriesSheet';
-import ProfileSheet from '@/components/ProfileSheet';
 import QuoteSlide from '@/components/QuoteSlide';
-import { CATEGORIES, DEFAULT_CATEGORY_KEY } from '@/data/categories';
-import { QUOTES, Quote } from '@/data/quotes';
+import { CATEGORIES, CATEGORY_LOOKUP } from '@/data/categories';
+import { scheduleDailyDropsIfNeeded } from '@/grit/notifications/notificationsScheduler';
+import { getFeedBatch, Phrase } from '@/grit/phrases';
 import { MainStackParamList } from '@/navigation/types';
 import { loadPreferences, saveBookmarked, saveLiked, saveSelectedCategories } from '@/storage/preferences';
 import { colors } from '@/theme/colors';
@@ -37,31 +37,143 @@ type ActionButton = {
 
 type Props = NativeStackScreenProps<MainStackParamList, 'Home'>;
 
+const FEED_BATCH_SIZE = 12;
+
 export default function HomeScreen({ navigation }: Props) {
   const [activeIndex, setActiveIndex] = useState(0);
   const [likedQuotes, setLikedQuotes] = useState<Record<string, boolean>>({});
   const [bookmarkedQuotes, setBookmarkedQuotes] = useState<Record<string, boolean>>({});
   const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
-  const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [isCategoriesOpen, setIsCategoriesOpen] = useState(false);
+  const [feedItems, setFeedItems] = useState<Phrase[]>([]);
+  const [feedCursor, setFeedCursor] = useState<string | null>(null);
+  const [isInitialLoading, setIsInitialLoading] = useState(true);
+  const [feedError, setFeedError] = useState<string | null>(null);
+  const [activePhraseId, setActivePhraseId] = useState<string | null>(null);
+  const [isFeedUnavailable, setIsFeedUnavailable] = useState(false);
   const { height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const hasRefreshedOnFocus = useRef(false);
-
-  const filteredQuotes = useMemo(() => {
-    if (selectedCategories.length === 0) {
-      return QUOTES;
+  const categorySignature = useMemo(() => {
+    if (!selectedCategories.length) {
+      return 'mix';
     }
-    const selectedSet = new Set(selectedCategories);
-    return QUOTES.filter((quote) => {
-      const categories = quote.categories?.length ? quote.categories : [DEFAULT_CATEGORY_KEY];
-      return categories.some((category) => selectedSet.has(category));
-    });
+    return selectedCategories.slice().sort().join('|');
   }, [selectedCategories]);
 
-  const activeQuote = filteredQuotes[activeIndex];
-  const isActiveLiked = activeQuote ? Boolean(likedQuotes[activeQuote.id]) : false;
-  const isActiveBookmarked = activeQuote ? Boolean(bookmarkedQuotes[activeQuote.id]) : false;
+  const categorySignatureRef = useRef(categorySignature);
+  useEffect(() => {
+    categorySignatureRef.current = categorySignature;
+  }, [categorySignature]);
+
+  const phraseCategories = useMemo(() => {
+    if (!selectedCategories.length) {
+      return undefined;
+    }
+    const seen = new Set<Phrase['category']>();
+    const next: Phrase['category'][] = [];
+    selectedCategories.forEach((key) => {
+      const match = CATEGORY_LOOKUP[key];
+      if (match) {
+        const category = match.label as Phrase['category'];
+        if (!seen.has(category)) {
+          seen.add(category);
+          next.push(category);
+        }
+      }
+    });
+    return next.length ? next : undefined;
+  }, [selectedCategories]);
+
+  const seenIdsRef = useRef<Set<string>>(new Set());
+  const isFetchingRef = useRef(false);
+  const cursorRef = useRef<string | null>(null);
+  const pendingResetRef = useRef(false);
+  const feedLengthRef = useRef(0);
+
+  useEffect(() => {
+    cursorRef.current = feedCursor;
+  }, [feedCursor]);
+
+  const fetchFeedBatch = useCallback(
+    async (options?: { reset?: boolean }) => {
+      if (isFetchingRef.current) {
+        if (options?.reset) {
+          pendingResetRef.current = true;
+        }
+        return;
+      }
+
+      pendingResetRef.current = false;
+
+      if (options?.reset) {
+        seenIdsRef.current = new Set();
+      }
+
+      isFetchingRef.current = true;
+      if (options?.reset) {
+        setIsInitialLoading(true);
+      }
+
+      const requestSignature = categorySignatureRef.current;
+
+      try {
+        const response = await getFeedBatch({
+          batchSize: FEED_BATCH_SIZE,
+          cursor: options?.reset ? null : cursorRef.current,
+          allowedCategories: phraseCategories,
+          excludeIds: Array.from(seenIdsRef.current),
+        });
+
+        if (categorySignatureRef.current !== requestSignature) {
+          return;
+        }
+
+        setFeedError(null);
+        setIsFeedUnavailable(response.totalAvailable === 0);
+        setFeedCursor(response.cursor);
+        cursorRef.current = response.cursor;
+
+        if (options?.reset) {
+          setActiveIndex(0);
+          setFeedItems(response.items);
+          seenIdsRef.current = new Set(response.items.map((item) => item.id));
+        } else {
+          setFeedItems((prev) => [...prev, ...response.items]);
+          response.items.forEach((item) => seenIdsRef.current.add(item.id));
+        }
+      } catch (error) {
+        if (categorySignatureRef.current === requestSignature) {
+          const message = error instanceof Error ? error.message : 'Unable to load feed.';
+          setFeedError(message);
+        }
+      } finally {
+        isFetchingRef.current = false;
+        setIsInitialLoading(false);
+        if (pendingResetRef.current) {
+          pendingResetRef.current = false;
+          void fetchFeedBatch({ reset: true });
+        }
+      }
+    },
+    [phraseCategories],
+  );
+
+  useEffect(() => {
+    setFeedItems([]);
+    setFeedCursor(null);
+    cursorRef.current = null;
+    setFeedError(null);
+    setIsFeedUnavailable(false);
+    setIsInitialLoading(true);
+    setActiveIndex(0);
+    seenIdsRef.current = new Set();
+    void fetchFeedBatch({ reset: true });
+  }, [categorySignature, fetchFeedBatch]);
+
+  const activePhrase = feedItems[activeIndex];
+  const isActiveLiked = activePhraseId ? Boolean(likedQuotes[activePhraseId]) : false;
+  const isActiveBookmarked = activePhraseId ? Boolean(bookmarkedQuotes[activePhraseId]) : false;
 
   const hydratePreferences = useCallback(async () => {
     const preferences = await loadPreferences();
@@ -78,6 +190,10 @@ export default function HomeScreen({ navigation }: Props) {
     void hydratePreferences();
   }, [hydratePreferences]);
 
+  useEffect(() => {
+    void scheduleDailyDropsIfNeeded();
+  }, []);
+
   useFocusEffect(
     useCallback(() => {
       if (!hasRefreshedOnFocus.current) {
@@ -90,103 +206,139 @@ export default function HomeScreen({ navigation }: Props) {
   );
 
   useEffect(() => {
-    const quote = filteredQuotes[activeIndex];
-    if (!quote) {
+    if (!activePhrase) {
       return;
     }
     capture('quote_viewed', {
-      quoteId: quote.id,
+      quoteId: activePhrase.id,
       index: activeIndex,
       activeCategories: selectedCategories,
       selectionCount: selectedCategories.length,
     });
-  }, [activeIndex, filteredQuotes, selectedCategories]);
+  }, [activeIndex, activePhrase, selectedCategories]);
 
   useEffect(() => {
     setActiveIndex((prev) => {
-      if (filteredQuotes.length === 0) {
+      if (feedItems.length === 0) {
         return 0;
       }
-      return Math.min(prev, filteredQuotes.length - 1);
+      return Math.min(prev, feedItems.length - 1);
     });
-  }, [filteredQuotes.length]);
+  }, [feedItems.length]);
 
-  const handleMomentumEnd = useCallback(
-    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-      const offsetY = event.nativeEvent.contentOffset.y;
-      const nextIndex = Math.round(offsetY / height);
-      const clampedIndex = Math.max(0, Math.min(nextIndex, filteredQuotes.length - 1));
-      setActiveIndex(clampedIndex);
+  useEffect(() => {
+    feedLengthRef.current = feedItems.length;
+  }, [feedItems.length]);
+
+  useEffect(() => {
+    const nextPhrase = feedItems[activeIndex];
+    setActivePhraseId(nextPhrase ? nextPhrase.id : null);
+  }, [activeIndex, feedItems]);
+
+  const viewabilityConfig = useRef({
+    itemVisiblePercentThreshold: 60,
+    minimumViewTime: 0,
+    waitForInteraction: false,
+  }).current;
+
+  const onViewableItemsChanged = useRef<NonNullable<FlatListProps<Phrase>['onViewableItemsChanged']>>(
+    ({ viewableItems }) => {
+      if (!viewableItems.length) {
+        return;
+      }
+      const first = viewableItems[0];
+      if (typeof first.index !== 'number') {
+        return;
+      }
+      const maxIndex = Math.max(0, feedLengthRef.current - 1);
+      const nextIndex = Math.max(0, Math.min(first.index, maxIndex));
+      setActiveIndex((prev) => (prev === nextIndex ? prev : nextIndex));
     },
-    [filteredQuotes.length, height]
-  );
+  ).current;
 
   const toggleLike = useCallback(() => {
-    if (!activeQuote) {
+    if (!activePhrase || !activePhraseId) {
       return;
     }
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setLikedQuotes((prev) => {
-      const nextValue = !prev[activeQuote.id];
-      capture('quote_liked_toggled', { quoteId: activeQuote.id, liked: nextValue });
+      const nextValue = !prev[activePhraseId];
+      capture('quote_liked_toggled', { quoteId: activePhraseId, liked: nextValue });
       const next = { ...prev };
       if (nextValue) {
-        next[activeQuote.id] = true;
+        next[activePhraseId] = true;
       } else {
-        delete next[activeQuote.id];
+        delete next[activePhraseId];
       }
       void saveLiked(next);
       return next;
     });
-  }, [activeQuote]);
+  }, [activePhrase, activePhraseId]);
 
   const toggleBookmark = useCallback(() => {
-    if (!activeQuote) {
+    if (!activePhrase || !activePhraseId) {
       return;
     }
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setBookmarkedQuotes((prev) => {
-      const nextValue = !prev[activeQuote.id];
-      capture('quote_saved_toggled', { quoteId: activeQuote.id, saved: nextValue });
+      const nextValue = !prev[activePhraseId];
+      capture('quote_saved_toggled', { quoteId: activePhraseId, saved: nextValue });
       const next = { ...prev };
       if (nextValue) {
-        next[activeQuote.id] = true;
+        next[activePhraseId] = true;
       } else {
-        delete next[activeQuote.id];
+        delete next[activePhraseId];
       }
       void saveBookmarked(next);
       return next;
     });
-  }, [activeQuote]);
+  }, [activePhrase, activePhraseId]);
 
   const handleShare = useCallback(() => {
-    if (!activeQuote) {
+    if (!activePhrase) {
       return;
     }
     Haptics.selectionAsync();
     void (async () => {
       try {
         const result = await Share.share({
-          message: `${activeQuote.text}\n\nDaily Discipline — Grit`,
+          message: `${activePhrase.text}\n\nDaily Discipline — Grit`,
         });
         capture('quote_shared', {
-          quoteId: activeQuote.id,
+          quoteId: activePhrase.id,
           source: 'home',
           shareResult: result.action,
           activityType: result.activityType,
         });
       } catch (error) {
         capture('quote_shared', {
-          quoteId: activeQuote.id,
+          quoteId: activePhrase.id,
           source: 'home',
           error: error instanceof Error ? error.message : 'unknown_error',
         });
       }
     })();
-  }, [activeQuote]);
+  }, [activePhrase]);
 
-  const handleFavoritesNavigation = useCallback(() => {
-    navigation.navigate('Favorites');
+  const handleDoubleTapLike = useCallback((phrase: Phrase) => {
+    setLikedQuotes((prev) => {
+      if (prev[phrase.id]) {
+        return prev;
+      }
+      capture('quote_liked_toggled', { quoteId: phrase.id, liked: true });
+      const next = { ...prev, [phrase.id]: true };
+      void saveLiked(next);
+      return next;
+    });
+  }, []);
+
+  const handleOpenProfile = useCallback(() => {
+    navigation.navigate('Profile');
+  }, [navigation]);
+
+  const handleOpenDrops = useCallback(() => {
+    capture('drops_open_requested', { source: 'home_top_bar' });
+    navigation.navigate('Drops');
   }, [navigation]);
 
   const handleOpenCategories = useCallback(() => {
@@ -220,12 +372,68 @@ export default function HomeScreen({ navigation }: Props) {
     });
   }, []);
 
-  const renderItem = useCallback(({ item }: { item: Quote }) => <QuoteSlide quote={item} />, []);
+  const handleRetryFeed = useCallback(() => {
+    setFeedError(null);
+    setIsFeedUnavailable(false);
+    setIsInitialLoading(true);
+    seenIdsRef.current = new Set();
+    void fetchFeedBatch({ reset: true });
+  }, [fetchFeedBatch]);
+
+  const renderItem = useCallback(
+    ({ item }: { item: Phrase }) => (
+      <QuoteSlide phrase={item} onDoubleTapLike={handleDoubleTapLike} />
+    ),
+    [handleDoubleTapLike],
+  );
 
   const getItemLayout = useCallback(
     (_: unknown, index: number) => ({ length: height, offset: height * index, index }),
     [height]
   );
+
+  const renderEmptyState = useCallback(() => {
+    if (isInitialLoading) {
+      return (
+        <>
+          <ActivityIndicator size="large" color={colors.textMuted} />
+          <Text style={styles.emptyTitle}>Loading feed…</Text>
+          <Text style={styles.emptySubtitle}>Finding the best phrases.</Text>
+        </>
+      );
+    }
+
+    if (feedError) {
+      return (
+        <>
+          <Ionicons name="alert-circle-outline" size={34} color={colors.textMuted} />
+          <Text style={styles.emptyTitle}>Couldn’t load phrases</Text>
+          <Text style={styles.emptySubtitle}>{feedError}</Text>
+          <TouchableOpacity style={styles.retryButton} onPress={handleRetryFeed} activeOpacity={0.85}>
+            <Text style={styles.retryLabel}>Try again</Text>
+          </TouchableOpacity>
+        </>
+      );
+    }
+
+    if (isFeedUnavailable) {
+      return (
+        <>
+          <Ionicons name="alert-circle-outline" size={34} color={colors.textMuted} />
+          <Text style={styles.emptyTitle}>No phrases in these categories</Text>
+          <Text style={styles.emptySubtitle}>Try Mix or choose another set.</Text>
+        </>
+      );
+    }
+
+    return (
+      <>
+        <Ionicons name="alert-circle-outline" size={34} color={colors.textMuted} />
+        <Text style={styles.emptyTitle}>Scroll to refresh</Text>
+        <Text style={styles.emptySubtitle}>We’ll keep loading fresh drops.</Text>
+      </>
+    );
+  }, [feedError, handleRetryFeed, isFeedUnavailable, isInitialLoading]);
 
   const actionButtons: ActionButton[] = [
     { key: 'share', icon: 'share-outline', onPress: handleShare },
@@ -243,28 +451,38 @@ export default function HomeScreen({ navigation }: Props) {
     },
   ];
 
+  useEffect(() => {
+    if (isFeedUnavailable || !cursorRef.current) {
+      return;
+    }
+    if (feedItems.length === 0) {
+      return;
+    }
+    const remaining = feedItems.length - activeIndex - 1;
+    if (remaining <= 4) {
+      void fetchFeedBatch();
+    }
+  }, [activeIndex, feedItems.length, fetchFeedBatch, isFeedUnavailable]);
+
   return (
     <View style={styles.container}>
       <StatusBar style="light" translucent />
       <View style={styles.listWrapper}>
         <FlatList
-          data={filteredQuotes}
+          data={feedItems}
           keyExtractor={(item) => item.id}
           renderItem={renderItem}
           pagingEnabled
           decelerationRate="fast"
           snapToInterval={height}
           snapToAlignment="start"
-          onMomentumScrollEnd={handleMomentumEnd}
+          onViewableItemsChanged={onViewableItemsChanged}
+          viewabilityConfig={viewabilityConfig}
           showsVerticalScrollIndicator={false}
           getItemLayout={getItemLayout}
           bounces={false}
           ListEmptyComponent={
-            <View style={styles.emptyState}>
-              <Ionicons name="alert-circle-outline" size={34} color={colors.textMuted} />
-              <Text style={styles.emptyTitle}>No quotes in these categories</Text>
-              <Text style={styles.emptySubtitle}>Try Mix or choose another set.</Text>
-            </View>
+            <View style={styles.emptyState}>{renderEmptyState()}</View>
           }
         />
       </View>
@@ -274,12 +492,20 @@ export default function HomeScreen({ navigation }: Props) {
           <TouchableOpacity
             style={styles.topIconButton}
             activeOpacity={0.8}
-            onPress={() => setIsProfileOpen(true)}
+            onPress={handleOpenProfile}
           >
             <Ionicons name="person-outline" size={22} color={colors.text} />
           </TouchableOpacity>
 
           <Text style={styles.brandText}>GRIT</Text>
+
+          <TouchableOpacity
+            style={styles.topIconButton}
+            activeOpacity={0.8}
+            onPress={handleOpenDrops}
+          >
+            <Ionicons name="water-outline" size={22} color={colors.text} />
+          </TouchableOpacity>
 
           <TouchableOpacity
             style={styles.topIconButton}
@@ -303,12 +529,6 @@ export default function HomeScreen({ navigation }: Props) {
           </TouchableOpacity>
         ))}
       </View>
-
-      <ProfileSheet
-        visible={isProfileOpen}
-        onClose={() => setIsProfileOpen(false)}
-        onFavoritesPress={handleFavoritesNavigation}
-      />
 
       <CategoriesSheet
         visible={isCategoriesOpen}
@@ -353,6 +573,18 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.1)',
     backgroundColor: 'rgba(255,255,255,0.06)',
+  },
+  retryButton: {
+    marginTop: spacing(1),
+    paddingHorizontal: spacing(4),
+    paddingVertical: spacing(2),
+    borderRadius: 14,
+    backgroundColor: colors.blue,
+  },
+  retryLabel: {
+    color: colors.bg,
+    fontWeight: '700',
+    fontSize: 14,
   },
   brandText: {
     flex: 1,

@@ -1,33 +1,32 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
+import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import * as Haptics from 'expo-haptics';
 import { useCallback, useState } from 'react';
-import {
-    FlatList,
-    Share,
-    StyleSheet,
-    Text,
-    TouchableOpacity,
-    View,
-} from 'react-native';
+import { FlatList, Share, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { capture, screen } from '@/analytics/posthog';
-import { QUOTES, Quote } from '@/data/quotes';
+import { PHRASE_PACK_V1, Phrase } from '@/grit/phrases';
+import { MainStackParamList } from '@/navigation/types';
 import { loadPreferences, saveBookmarked } from '@/storage/preferences';
 import { colors } from '@/theme/colors';
 import { spacing } from '@/utils/spacing';
+import { useProfileHeaderBackButton } from './profile/useProfileHeaderBackButton';
 
-type FavoriteItem = Quote;
+type FavoriteItem = Phrase;
+type Props = NativeStackScreenProps<MainStackParamList, 'Favorites'>;
 
-export default function FavoritesScreen() {
+export default function FavoritesScreen({ navigation }: Props) {
+  useProfileHeaderBackButton(navigation);
+
   const [bookmarkedQuotes, setBookmarkedQuotes] = useState<Record<string, boolean>>({});
   const [favorites, setFavorites] = useState<FavoriteItem[]>([]);
 
   const refreshFavorites = useCallback(async (shouldLogOpen = false) => {
     const preferences = await loadPreferences();
     const bookmarked = preferences.bookmarked ?? {};
-    const nextFavorites = QUOTES.filter((quote) => bookmarked[quote.id]);
+    const nextFavorites = PHRASE_PACK_V1.phrases.filter((phrase) => bookmarked[phrase.id]);
     setBookmarkedQuotes(bookmarked);
     setFavorites(nextFavorites);
     if (shouldLogOpen) {
@@ -54,28 +53,28 @@ export default function FavoritesScreen() {
       } else {
         next[quoteId] = true;
       }
-      const nextFavorites = QUOTES.filter((quote) => next[quote.id]);
+      const nextFavorites = PHRASE_PACK_V1.phrases.filter((phrase) => next[phrase.id]);
       setFavorites(nextFavorites);
       void saveBookmarked(next);
       return next;
     });
   }, []);
 
-  const handleShare = useCallback((quote: Quote) => {
+  const handleShare = useCallback((phrase: Phrase) => {
     void (async () => {
       try {
         const result = await Share.share({
-          message: `${quote.text}\n\nDaily Discipline — Grit`,
+          message: `${phrase.text}\n\nDaily Discipline — Grit`,
         });
         capture('favorite_shared', {
-          quoteId: quote.id,
+          quoteId: phrase.id,
           source: 'favorites',
           shareResult: result.action,
           activityType: result.activityType,
         });
       } catch (error) {
         capture('favorite_shared', {
-          quoteId: quote.id,
+          quoteId: phrase.id,
           source: 'favorites',
           error: error instanceof Error ? error.message : 'unknown_error',
         });

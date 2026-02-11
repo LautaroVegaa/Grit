@@ -1,107 +1,47 @@
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import DateTimePicker, { DateTimePickerAndroid } from '@react-native-community/datetimepicker';
-import { useEffect, useMemo, useRef, useState } from 'react';
-import {
-  AccessibilityInfo,
-  Animated,
-  Easing,
-  Modal,
-  Platform,
-  Pressable,
-  StyleSheet,
-  Text,
-  TouchableWithoutFeedback,
-  View,
-} from 'react-native';
+import { useEffect, useMemo, useState } from 'react';
+import { Modal, Platform, Pressable, StyleSheet, Text, TouchableWithoutFeedback, View } from 'react-native';
 
 import { capture, screen as trackScreen } from '@/analytics/posthog';
+import { ReminderWindowScreenContent } from '@/components/ReminderWindowScreenContent';
 import { OnboardingShell } from '@/components/onboarding/OnboardingShell';
 import { ONBOARDING_PROGRESS } from '@/constants/onboardingProgress';
 import { useOnboarding } from '@/context/OnboardingContext';
 import { OnboardingStackParamList } from '@/navigation/types';
 import { GRIT } from '@/theme/gritTheme';
 import { spacing } from '@/utils/spacing';
+import {
+  DAY_MINUTES,
+  DEFAULT_REMINDER_COUNT,
+  DEFAULT_REMINDER_END,
+  DEFAULT_REMINDER_START,
+  clampReminderCount,
+  ensureValidEndMinutes,
+  minutesToDate,
+  minutesToTimeString,
+  timeStringToMinutes,
+} from '@/utils/reminderWindow';
 
-const MIN_COUNT = 1;
-const MAX_COUNT = 20;
-const DEFAULT_COUNT = 8;
-const DEFAULT_START = '09:00';
-const DEFAULT_END = '22:00';
-
-const DAY_MINUTES = 24 * 60;
-
-function timeStringToMinutes(value: string) {
-  const [hours, minutes] = value.split(':').map((part) => Number(part));
-  if (Number.isNaN(hours) || Number.isNaN(minutes)) {
-    return 0;
-  }
-  return hours * 60 + minutes;
-}
-
-function minutesToTimeString(totalMinutes: number) {
-  const minutes = Math.max(0, Math.min(DAY_MINUTES - 1, totalMinutes));
-  const h = Math.floor(minutes / 60)
-    .toString()
-    .padStart(2, '0');
-  const m = (minutes % 60).toString().padStart(2, '0');
-  return `${h}:${m}`;
-}
-
-function minutesToDate(totalMinutes: number) {
-  const clamped = Math.max(0, Math.min(DAY_MINUTES - 1, totalMinutes));
-  const date = new Date();
-  date.setHours(Math.floor(clamped / 60), clamped % 60, 0, 0);
-  return date;
-}
 
 export type AffirmationsNotificationScheduleScreenProps = NativeStackScreenProps<
   OnboardingStackParamList,
   'OnboardingAffirmationsNotificationSchedule'
 >;
 
+const clampMinutes = (value: number) => Math.max(0, Math.min(DAY_MINUTES - 1, value));
+
 export function AffirmationsNotificationScheduleScreen({ navigation }: AffirmationsNotificationScheduleScreenProps) {
   const { data, setValue } = useOnboarding();
-  const [count, setCount] = useState(data.affirmations_notif_count ?? DEFAULT_COUNT);
+  const [count, setCount] = useState(data.affirmations_notif_count ?? DEFAULT_REMINDER_COUNT);
   const [startMinutes, setStartMinutes] = useState(
-    timeStringToMinutes(data.affirmations_notif_start ?? DEFAULT_START)
+    timeStringToMinutes(data.affirmations_notif_start ?? DEFAULT_REMINDER_START)
   );
-  const [endMinutes, setEndMinutes] = useState(timeStringToMinutes(data.affirmations_notif_end ?? DEFAULT_END));
+  const [endMinutes, setEndMinutes] = useState(timeStringToMinutes(data.affirmations_notif_end ?? DEFAULT_REMINDER_END));
   const [iosPickerField, setIosPickerField] = useState<'start' | 'end' | null>(null);
-  const cardOneProgress = useRef(new Animated.Value(0)).current;
-  const cardTwoProgress = useRef(new Animated.Value(0)).current;
-
   useEffect(() => {
     trackScreen('OnboardingAffirmationsNotificationSchedule');
     capture('onboarding_step_viewed', { stepName: 'affirmations-schedule' });
-    let isMounted = true;
-    AccessibilityInfo.isReduceMotionEnabled().then((reduceMotion) => {
-      if (!isMounted) {
-        return;
-      }
-      if (reduceMotion) {
-        cardOneProgress.setValue(1);
-        cardTwoProgress.setValue(1);
-        return;
-      }
-      Animated.sequence([
-        Animated.timing(cardOneProgress, {
-          toValue: 1,
-          duration: 560,
-          easing: Easing.out(Easing.cubic),
-          useNativeDriver: true,
-        }),
-        Animated.delay(180),
-        Animated.timing(cardTwoProgress, {
-          toValue: 1,
-          duration: 560,
-          easing: Easing.out(Easing.cubic),
-          useNativeDriver: true,
-        }),
-      ]).start();
-    });
-    return () => {
-      isMounted = false;
-    };
   }, []);
 
   const helperLine = useMemo(
@@ -110,16 +50,9 @@ export function AffirmationsNotificationScheduleScreen({ navigation }: Affirmati
     [count, endMinutes, startMinutes]
   );
 
-  const clampEnd = (nextStart: number, proposedEnd: number) => {
-    if (proposedEnd <= nextStart) {
-      return Math.min(nextStart + 60, DAY_MINUTES - 1);
-    }
-    return proposedEnd;
-  };
-
   const handleAdjustCount = (delta: number) => {
     setCount((prev) => {
-      const next = Math.max(MIN_COUNT, Math.min(MAX_COUNT, prev + delta));
+      const next = clampReminderCount(prev + delta);
       if (next !== prev) {
         capture('onboarding_answer_changed', { field: 'affirmations_notif_count', value: next });
       }
@@ -129,22 +62,21 @@ export function AffirmationsNotificationScheduleScreen({ navigation }: Affirmati
 
   const applyStartMinutes = (minutes: number) => {
     setStartMinutes((prev) => {
-      const clamped = Math.max(0, Math.min(DAY_MINUTES - 1, minutes));
+      const clamped = clampMinutes(minutes);
       if (clamped !== prev) {
         capture('onboarding_answer_changed', {
           field: 'affirmations_notif_start',
           value: minutesToTimeString(clamped),
         });
       }
-      setEndMinutes((currentEnd) => clampEnd(clamped, currentEnd));
+      setEndMinutes((currentEnd) => ensureValidEndMinutes(clamped, currentEnd));
       return clamped;
     });
   };
 
   const applyEndMinutes = (minutes: number) => {
     setEndMinutes((prev) => {
-      const clamped = Math.max(0, Math.min(DAY_MINUTES - 1, minutes));
-      const adjusted = clampEnd(startMinutes, clamped);
+      const adjusted = ensureValidEndMinutes(startMinutes, minutes);
       if (adjusted !== prev) {
         capture('onboarding_answer_changed', {
           field: 'affirmations_notif_end',
@@ -211,14 +143,11 @@ export function AffirmationsNotificationScheduleScreen({ navigation }: Affirmati
 
   const handleSkip = async () => {
     capture('onboarding_step_skipped', { stepName: 'affirmations-schedule' });
-    await setValue('affirmations_notif_count', DEFAULT_COUNT);
-    await setValue('affirmations_notif_start', DEFAULT_START);
-    await setValue('affirmations_notif_end', DEFAULT_END);
+    await setValue('affirmations_notif_count', DEFAULT_REMINDER_COUNT);
+    await setValue('affirmations_notif_start', DEFAULT_REMINDER_START);
+    await setValue('affirmations_notif_end', DEFAULT_REMINDER_END);
     navigation.navigate('OnboardingAwarenessBreather');
   };
-
-  const canDecrement = count <= MIN_COUNT;
-  const canIncrement = count >= MAX_COUNT;
 
   return (
     <>
@@ -230,111 +159,16 @@ export function AffirmationsNotificationScheduleScreen({ navigation }: Affirmati
         showSkip
         onSkip={handleSkip}
       >
-        <View style={styles.previewStack}>
-          <Animated.View
-            style={[
-              styles.previewCard,
-              styles.previewCardSecondary,
-              {
-                opacity: cardOneProgress,
-                transform: [
-                  {
-                    translateY: cardOneProgress.interpolate({
-                      inputRange: [0, 1],
-                      outputRange: [-14, 0],
-                    }),
-                  },
-                  {
-                    scale: cardOneProgress.interpolate({
-                      inputRange: [0, 1],
-                      outputRange: [0.98, 1],
-                    }),
-                  },
-                  { translateY: 10 },
-                ],
-              },
-            ]}
-          >
-            <View style={styles.previewBadge} />
-            <View style={styles.previewTextBlock}>
-              <Text style={styles.previewTime}>now</Text>
-              <Text style={styles.previewBody}>
-                Today is full of possibilities. Embrace them with open arms.
-              </Text>
-            </View>
-          </Animated.View>
-          <Animated.View
-            style={[
-              styles.previewCard,
-              styles.previewCardPrimary,
-              {
-                opacity: cardTwoProgress,
-                transform: [
-                  {
-                    translateY: cardTwoProgress.interpolate({
-                      inputRange: [0, 1],
-                      outputRange: [-14, 0],
-                    }),
-                  },
-                  {
-                    scale: cardTwoProgress.interpolate({
-                      inputRange: [0, 1],
-                      outputRange: [0.98, 1],
-                    }),
-                  },
-                  { translateY: -30 },
-                ],
-              },
-            ]}
-          >
-            <View style={styles.previewBadge} />
-            <View style={styles.previewTextBlock}>
-              <Text style={styles.previewTime}>now</Text>
-              <Text style={styles.previewBody}>
-                You are capable of achieving great things. Trust yourself.
-              </Text>
-            </View>
-          </Animated.View>
-        </View>
-
-        <View style={styles.card}>
-          <Text style={styles.cardLabel}>How many</Text>
-          <View style={styles.countRow}>
-            <Pressable
-              onPress={() => handleAdjustCount(-1)}
-              disabled={canDecrement}
-              style={[styles.circleButton, canDecrement && styles.circleButtonDisabled]}
-            >
-              <Text style={styles.circleButtonLabel}>-</Text>
-            </Pressable>
-            <Text style={styles.countValue}>{count}x</Text>
-            <Pressable
-              onPress={() => handleAdjustCount(1)}
-              disabled={canIncrement}
-              style={[styles.circleButton, canIncrement && styles.circleButtonDisabled]}
-            >
-              <Text style={styles.circleButtonLabel}>+</Text>
-            </Pressable>
-          </View>
-        </View>
-
-        <Text style={styles.frequencyCaption}>You can change this anytime. Most athletes start with 6x.</Text>
-
-        <View style={styles.timeCard}>
-          <Text style={styles.cardLabel}>Start at</Text>
-          <Pressable style={styles.timePill} onPress={() => showPicker('start')}>
-            <Text style={styles.timeValue}>{minutesToTimeString(startMinutes)}</Text>
-          </Pressable>
-        </View>
-
-        <View style={styles.timeCard}>
-          <Text style={styles.cardLabel}>End at</Text>
-          <Pressable style={styles.timePill} onPress={() => showPicker('end')}>
-            <Text style={styles.timeValue}>{minutesToTimeString(endMinutes)}</Text>
-          </Pressable>
-        </View>
-
-        <Text style={styles.helper}>{helperLine}</Text>
+        <ReminderWindowScreenContent
+          count={count}
+          onIncrement={() => handleAdjustCount(1)}
+          onDecrement={() => handleAdjustCount(-1)}
+          startTimeLabel={minutesToTimeString(startMinutes)}
+          endTimeLabel={minutesToTimeString(endMinutes)}
+          onPressStart={() => showPicker('start')}
+          onPressEnd={() => showPicker('end')}
+          helperLine={helperLine}
+        />
       </OnboardingShell>
 
       {Platform.OS === 'ios' && iosPickerField ? (
@@ -363,127 +197,6 @@ export function AffirmationsNotificationScheduleScreen({ navigation }: Affirmati
 }
 
 const styles = StyleSheet.create({
-  previewStack: {
-    gap: spacing(2),
-  },
-  previewCard: {
-    flexDirection: 'row',
-    gap: spacing(2),
-    borderRadius: 20,
-    padding: spacing(2.5),
-    borderWidth: 1,
-    borderColor: GRIT.colors.border0,
-    backgroundColor: GRIT.colors.bg1,
-    shadowColor: '#000',
-    shadowOpacity: 0.18,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 8 },
-    elevation: 6,
-  },
-  previewCardSecondary: {
-    opacity: 0.6,
-    transform: [{ translateY: 10 }],
-  },
-  previewCardPrimary: {
-    marginTop: -30,
-  },
-  previewBadge: {
-    width: 36,
-    height: 36,
-    borderRadius: 12,
-    backgroundColor: GRIT.colors.blue,
-  },
-  previewTextBlock: {
-    flex: 1,
-    gap: spacing(0.5),
-  },
-  previewTime: {
-    color: GRIT.colors.text2,
-    fontSize: 13,
-    textTransform: 'uppercase',
-    letterSpacing: 1,
-  },
-  previewBody: {
-    color: GRIT.colors.text0,
-    fontSize: 15,
-    lineHeight: 22,
-  },
-  card: {
-    marginTop: spacing(0.5),
-    borderRadius: 22,
-    borderWidth: 1,
-    borderColor: GRIT.colors.border0,
-    backgroundColor: GRIT.colors.bg1,
-    padding: spacing(2.5),
-    gap: spacing(2),
-  },
-  frequencyCaption: {
-    fontSize: 13,
-    color: GRIT.colors.text2,
-    marginTop: spacing(1),
-  },
-  cardLabel: {
-    color: GRIT.colors.text2,
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  countRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: spacing(2),
-  },
-  circleButton: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.2)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  circleButtonDisabled: {
-    opacity: 0.3,
-  },
-  circleButtonLabel: {
-    color: GRIT.colors.text0,
-    fontSize: 24,
-    fontWeight: '600',
-  },
-  countValue: {
-    color: GRIT.colors.text0,
-    fontSize: 32,
-    fontWeight: '800',
-  },
-  timeCard: {
-    borderRadius: 22,
-    borderWidth: 1,
-    borderColor: GRIT.colors.border0,
-    backgroundColor: GRIT.colors.bg1,
-    paddingHorizontal: spacing(2.5),
-    paddingVertical: spacing(2),
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  timePill: {
-    paddingHorizontal: spacing(2.5),
-    paddingVertical: spacing(1),
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.2)',
-  },
-  timeValue: {
-    color: GRIT.colors.text0,
-    fontSize: 18,
-    fontWeight: '700',
-  },
-  helper: {
-    textAlign: 'center',
-    color: GRIT.colors.text2,
-    fontSize: 13,
-    lineHeight: 18,
-  },
   pickerBackdrop: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.6)',

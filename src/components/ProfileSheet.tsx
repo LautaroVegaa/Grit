@@ -1,11 +1,10 @@
 import { Ionicons } from '@expo/vector-icons';
 import { NavigationProp, useNavigation } from '@react-navigation/native';
-import { ReactNode, useCallback, useEffect, useRef, useState } from 'react';
+import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Animated,
   Easing,
-  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -18,20 +17,25 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 
 import { capture } from '@/analytics/posthog';
 import { useOnboarding } from '@/context/OnboardingContext';
-import { RootStackParamList } from '@/navigation/types';
+import { navigationRef } from '@/navigation/navigationRef';
+import { MainStackParamList } from '@/navigation/types';
 import { spacing } from '@/utils/spacing';
+import { getProfileGender, getProfileName, getNotificationsEnabled, ProfileGenderValue } from '@/storage/profileStorage';
+import { loadRemindersPerDay } from '@/grit/storage/notificationsStorage';
+import { getStreakState } from '@/storage/streakStorage';
+import { subscribeToProfileUpdates } from '@/utils/profileEvents';
+import { OnboardingMascot } from '@/components/onboarding/OnboardingMascot';
 
 type ProfileSheetProps = {
   visible: boolean;
   onClose: () => void;
-  onFavoritesPress?: () => void;
 };
 
 type ListRow = {
   key: string;
   label: string;
   icon: keyof typeof Ionicons.glyphMap;
-  value?: string;
+  value?: string | null;
 };
 
 const palette = {
@@ -45,37 +49,84 @@ const palette = {
   bluePressed: '#2566CC',
 };
 
-const settingsRows: ListRow[] = [
-  { key: 'name', label: 'Name', icon: 'person-outline', value: 'Lautaro' },
-  { key: 'gender', label: 'Gender', icon: 'male-female-outline', value: 'Male' },
-  { key: 'theme', label: 'Theme', icon: 'color-palette-outline', value: 'System' },
-  { key: 'notifications', label: 'Notifications', icon: 'notifications-outline' },
-  { key: 'widgets', label: 'Widgets', icon: 'grid-outline' },
-  { key: 'customer-center', label: 'Customer center', icon: 'help-buoy-outline' },
-  { key: 'favorites', label: 'My favorites', icon: 'heart-outline' },
-  { key: 'feedback', label: 'Feedback', icon: 'chatbubble-ellipses-outline' },
-];
+const DEFAULT_REMINDERS = 6;
+
+const GENDER_LABELS: Record<ProfileGenderValue, string> = {
+  male: 'Male',
+  female: 'Female',
+  others: 'Other',
+  prefer_not_say: 'Prefer not to say',
+};
 
 const legalRows: ListRow[] = [
   { key: 'privacy', label: 'Privacy Policy', icon: 'shield-outline' },
   { key: 'terms', label: 'Terms of Use', icon: 'document-text-outline' },
 ];
 
-function ProfileSheet({ visible, onClose, onFavoritesPress }: ProfileSheetProps) {
-  const navigation = useNavigation<NavigationProp<RootStackParamList>>();
-  const { resetOnboarding, forceOnboarding, updateForceOnboarding } = useOnboarding();
+function ProfileSheet({ visible, onClose }: ProfileSheetProps) {
+  const navigation = useNavigation<NavigationProp<MainStackParamList>>();
+  const { resetOnboarding } = useOnboarding();
   const [rendered, setRendered] = useState(visible);
   const backdropOpacity = useRef(new Animated.Value(0)).current;
   const translateY = useRef(new Animated.Value(1)).current;
   const { height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const sheetHeight = height * 0.88;
+  const [profileNameValue, setProfileNameValue] = useState<string | null>(null);
+  const [profileGenderValue, setProfileGenderValue] = useState<ProfileGenderValue | null>(null);
+  const [notificationsEnabled, setNotificationsEnabledState] = useState(true);
+  const [remindersPerDay, setRemindersPerDayState] = useState<number | null>(null);
+  const [streakCount, setStreakCount] = useState<number>(1);
+
+  const refreshProfileData = useCallback(async () => {
+    try {
+      const [name, gender, enabled, reminders, streak] = await Promise.all([
+        getProfileName(),
+        getProfileGender(),
+        getNotificationsEnabled(),
+        loadRemindersPerDay(),
+        getStreakState(),
+      ]);
+      setProfileNameValue(name ?? null);
+      setProfileGenderValue(gender ?? null);
+      setNotificationsEnabledState(enabled);
+      setRemindersPerDayState(reminders ?? DEFAULT_REMINDERS);
+      setStreakCount(Math.max(1, streak?.streakCount ?? 1));
+    } catch (error) {
+      if (__DEV__) {
+        console.warn('Failed to refresh profile data', error);
+      }
+    }
+  }, []);
 
   useEffect(() => {
     if (visible) {
       capture('profile_opened');
     }
   }, [visible]);
+
+  useEffect(() => {
+    if (!visible) {
+      return;
+    }
+    let active = true;
+    void (async () => {
+      if (!active) {
+        return;
+      }
+      await refreshProfileData();
+    })();
+    return () => {
+      active = false;
+    };
+  }, [refreshProfileData, visible]);
+
+  useEffect(() => {
+    const unsubscribe = subscribeToProfileUpdates(() => {
+      void refreshProfileData();
+    });
+    return unsubscribe;
+  }, [refreshProfileData]);
 
   const handleClose = useCallback(
     (method: 'backdrop' | 'close_button') => {
@@ -85,6 +136,33 @@ function ProfileSheet({ visible, onClose, onFavoritesPress }: ProfileSheetProps)
     [onClose]
   );
 
+  const nameDisplay = profileNameValue && profileNameValue.trim().length > 0
+    ? profileNameValue
+    : 'Add name';
+  const genderDisplay = profileGenderValue ? GENDER_LABELS[profileGenderValue] : 'Not set';
+  const notificationsDisplay = notificationsEnabled
+    ? `${remindersPerDay ?? DEFAULT_REMINDERS} / day`
+    : 'Off';
+
+  const settingsRowsData = useMemo<ListRow[]>(
+    () => [
+      { key: 'name', label: 'Name', icon: 'person-outline', value: nameDisplay },
+      { key: 'gender', label: 'Gender', icon: 'male-female-outline', value: genderDisplay },
+      { key: 'theme', label: 'Theme', icon: 'color-palette-outline', value: 'System' },
+      {
+        key: 'notifications',
+        label: 'Notifications',
+        icon: 'notifications-outline',
+        value: notificationsDisplay,
+      },
+      { key: 'widgets', label: 'Widgets', icon: 'grid-outline', value: 'Soon' },
+      { key: 'customer-center', label: 'Customer center', icon: 'help-buoy-outline' },
+      { key: 'saved', label: 'Saved', icon: 'bookmark-outline' },
+      { key: 'feedback', label: 'Feedback', icon: 'chatbubble-ellipses-outline' },
+    ],
+    [genderDisplay, nameDisplay, notificationsDisplay],
+  );
+
   const handlePremiumPress = useCallback(() => {
     capture('paywall_open_requested', { source: 'profile_unlock_card' });
   }, []);
@@ -92,13 +170,32 @@ function ProfileSheet({ visible, onClose, onFavoritesPress }: ProfileSheetProps)
   const handleSettingsPress = useCallback(
     (key: string) => {
       capture('profile_setting_tapped', { itemKey: key });
-      if (key === 'favorites') {
-        capture('favorites_open_requested');
-        handleClose('close_button');
-        onFavoritesPress?.();
+      switch (key) {
+        case 'name':
+          navigation.navigate('ProfileName');
+          break;
+        case 'gender':
+          navigation.navigate('ProfileGender');
+          break;
+        case 'notifications':
+          navigation.navigate('ProfileNotifications');
+          break;
+        case 'saved':
+        case 'favorites':
+          capture('favorites_open_requested');
+          navigation.navigate('Favorites');
+          break;
+        case 'feedback':
+          navigation.navigate('ProfileFeedback');
+          break;
+        case 'customer-center':
+          // TODO: Hook up customer center when service is ready.
+          break;
+        default:
+          break;
       }
     },
-    [handleClose, onFavoritesPress]
+    [navigation]
   );
 
   const handleReplayOnboarding = useCallback(() => {
@@ -111,23 +208,20 @@ function ProfileSheet({ visible, onClose, onFavoritesPress }: ProfileSheetProps)
         onPress: () => {
           capture('onboarding_replay_confirmed');
           void (async () => {
-            await resetOnboarding();
-            navigation.reset({ index: 0, routes: [{ name: 'Onboarding' }] });
-            handleClose('close_button');
+            try {
+              await resetOnboarding();
+              if (navigationRef.isReady()) {
+                navigationRef.resetRoot({ index: 0, routes: [{ name: 'Onboarding' }] });
+              }
+              handleClose('close_button');
+            } catch {
+              Alert.alert('Unable to replay', 'Please try again later.');
+            }
           })();
         },
       },
     ]);
-  }, [handleClose, navigation, resetOnboarding]);
-
-  const handleForceToggle = useCallback(() => {
-    if (!__DEV__) {
-      return;
-    }
-    const next = !forceOnboarding;
-    capture('onboarding_force_toggle_changed', { next });
-    void updateForceOnboarding(next);
-  }, [forceOnboarding, updateForceOnboarding]);
+  }, [handleClose, resetOnboarding]);
 
   useEffect(() => {
     if (visible) {
@@ -189,45 +283,37 @@ function ProfileSheet({ visible, onClose, onFavoritesPress }: ProfileSheetProps)
   });
 
   return (
-    <Modal
-      transparent
-      animationType="none"
-      visible={rendered}
-      onRequestClose={() => handleClose('backdrop')}
-    >
-      <View style={styles.modalRoot}>
-        <Animated.View style={[styles.backdrop, { opacity: backdropOpacity }]}>
-          <Pressable style={StyleSheet.absoluteFill} onPress={() => handleClose('backdrop')} />
-        </Animated.View>
+    <View style={styles.modalRoot} pointerEvents="box-none">
+      <Animated.View style={[styles.backdrop, { opacity: backdropOpacity }]}>
+        <Pressable style={StyleSheet.absoluteFill} onPress={() => handleClose('backdrop')} />
+      </Animated.View>
 
-        <Animated.View
-          style={[
-            styles.sheet,
-            {
-              height: sheetHeight,
-              transform: [{ translateY: sheetTranslate }],
-            },
-          ]}>
-          <SafeAreaView style={styles.sheetSafeArea} edges={['top']}>
-            <ScrollView
-              showsVerticalScrollIndicator={false}
-              contentContainerStyle={[
-                styles.content,
-                { paddingBottom: insets.bottom + spacing(8) },
-              ]}>
-              {renderHeader(() => handleClose('close_button'))}
-              {renderMascotBadge()}
-              {renderPremiumCard(handlePremiumPress)}
-              {renderStreakCard()}
-              {renderSection('Settings', renderSettingsRows(handleSettingsPress, renderReplayRow(handleReplayOnboarding)))}
-              {renderSection('Legal', renderLegalRows())}
-              {__DEV__ ? renderSection('Developer', renderDeveloperRows(forceOnboarding, handleForceToggle)) : null}
-              <Text style={styles.footerText}>v0.1.0 (dev)</Text>
-            </ScrollView>
-          </SafeAreaView>
-        </Animated.View>
-      </View>
-    </Modal>
+      <Animated.View
+        style={[
+          styles.sheet,
+          {
+            height: sheetHeight,
+            transform: [{ translateY: sheetTranslate }],
+          },
+        ]}>
+        <SafeAreaView style={styles.sheetSafeArea} edges={['top']}>
+          <ScrollView
+            showsVerticalScrollIndicator={false}
+            contentContainerStyle={[
+              styles.content,
+              { paddingBottom: insets.bottom + spacing(8) },
+            ]}>
+            {renderHeader(() => handleClose('close_button'))}
+            {renderMascotBadge()}
+            {renderPremiumCard(handlePremiumPress)}
+            {renderStreakCard(streakCount)}
+            {renderSection('Settings', renderSettingsRows(settingsRowsData, handleSettingsPress, renderReplayRow(handleReplayOnboarding)))}
+            {renderSection('Legal', renderLegalRows())}
+            <Text style={styles.footerText}>v0.1.0 (dev)</Text>
+          </ScrollView>
+        </SafeAreaView>
+      </Animated.View>
+    </View>
   );
 }
 
@@ -240,7 +326,6 @@ function renderHeader(onClosePress: () => void) {
         <Ionicons name="close" size={22} color={palette.textPrimary} />
       </TouchableOpacity>
       <Text style={styles.headerTitle}>Profile</Text>
-      <View style={{ width: 36 }} />
     </View>
   );
 }
@@ -248,9 +333,7 @@ function renderHeader(onClosePress: () => void) {
 function renderMascotBadge() {
   return (
     <View style={styles.mascotWrapper}>
-      <View style={styles.mascotBadge}>
-        <Text style={styles.mascotInitial}>G</Text>
-      </View>
+      <OnboardingMascot size={132} />
     </View>
   );
 }
@@ -273,15 +356,15 @@ function renderPremiumCard(onUnlockPress: () => void) {
   );
 }
 
-function renderStreakCard() {
+function renderStreakCard(streakCount: number) {
   const days = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
-  const highlightIndex = 2;
+  const highlightIndex = new Date().getDay();
 
   return (
     <View style={styles.streakCard}>
       <View style={styles.streakNumberWrapper}>
-        <Text style={styles.streakNumber}>1</Text>
-        <Text style={styles.streakLabel}>day</Text>
+        <Text style={styles.streakNumber}>{streakCount}</Text>
+        <Text style={styles.streakLabel}>{streakCount === 1 ? 'day' : 'days'}</Text>
       </View>
       <View style={styles.streakTracker}>
         {days.map((day, index) => {
@@ -313,10 +396,14 @@ function renderSection(title: string, content: ReactNode) {
   );
 }
 
-function renderSettingsRows(onRowPress: (key: string) => void, extraRows?: ReactNode) {
+function renderSettingsRows(
+  rows: ListRow[],
+  onRowPress: (key: string) => void,
+  extraRows?: ReactNode,
+) {
   return (
     <View style={styles.cardList}>
-      {settingsRows.map((row, index) => (
+      {rows.map((row, index) => (
         <View key={row.key}>
           <Pressable style={styles.listRow} onPress={() => onRowPress(row.key)}>
             <View style={styles.rowLeft}>
@@ -330,7 +417,7 @@ function renderSettingsRows(onRowPress: (key: string) => void, extraRows?: React
               <Ionicons name="chevron-forward" size={16} color={palette.textSecondary} />
             </View>
           </Pressable>
-          {index < settingsRows.length - 1 ? <View style={styles.rowDivider} /> : null}
+          {index < rows.length - 1 ? <View style={styles.rowDivider} /> : null}
         </View>
       ))}
       {extraRows}
@@ -352,25 +439,6 @@ function renderReplayRow(onReplay: () => void) {
         <Ionicons name="chevron-forward" size={16} color={palette.textSecondary} />
       </Pressable>
     </>
-  );
-}
-
-function renderDeveloperRows(forceOnboarding: boolean, onToggle: () => void) {
-  return (
-    <View style={styles.cardList}>
-      <Pressable style={styles.listRow} onPress={onToggle}>
-        <View style={styles.rowLeft}>
-          <View style={styles.rowIconCircle}>
-            <Ionicons name="build-outline" size={18} color={palette.blue} />
-          </View>
-          <Text style={styles.rowLabel}>Force onboarding on next launch</Text>
-        </View>
-        <View style={styles.rowRight}>
-          <Text style={styles.rowValue}>{forceOnboarding ? 'On' : 'Off'}</Text>
-          <Ionicons name="chevron-forward" size={16} color={palette.textSecondary} />
-        </View>
-      </Pressable>
-    </View>
   );
 }
 
@@ -397,7 +465,11 @@ function renderLegalRows() {
 
 const styles = StyleSheet.create({
   modalRoot: {
-    flex: 1,
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
     justifyContent: 'flex-end',
   },
   backdrop: {
@@ -419,12 +491,16 @@ const styles = StyleSheet.create({
     gap: spacing(4),
   },
   headerRow: {
-    flexDirection: 'row',
+    position: 'relative',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: spacing(1),
+    justifyContent: 'center',
+    marginBottom: spacing(1.5),
+    paddingTop: spacing(0.5),
+    minHeight: 48,
   },
   closeButton: {
+    position: 'absolute',
+    left: 0,
     width: 36,
     height: 36,
     borderRadius: 18,
@@ -438,25 +514,12 @@ const styles = StyleSheet.create({
     color: palette.textPrimary,
     fontSize: 28,
     fontWeight: '700',
+    textAlign: 'center',
   },
   mascotWrapper: {
     alignItems: 'center',
-    marginTop: spacing(1),
-  },
-  mascotBadge: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    borderWidth: 1,
-    borderColor: palette.divider,
-    backgroundColor: palette.elevated,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  mascotInitial: {
-    color: palette.blue,
-    fontSize: 32,
-    fontWeight: '700',
+    marginTop: spacing(2),
+    marginBottom: spacing(2.5),
   },
   premiumCard: {
     flexDirection: 'row',

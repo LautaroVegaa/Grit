@@ -1,12 +1,31 @@
+import type { NavigatorScreenParams } from '@react-navigation/native';
+
 export type RootStackParamList = {
   Loading: undefined;
   Onboarding: undefined;
-  Main: undefined;
+  Main: NavigatorScreenParams<MainStackParamList> | undefined;
 };
 
 export type MainStackParamList = {
+  DailyGate: undefined;
   Home: undefined;
   Favorites: undefined;
+  Drops: undefined;
+  PhraseDetail: { phraseId: string };
+  Profile: undefined;
+  ProfileName: undefined;
+  ProfileGender: undefined;
+  ProfileNotifications: undefined;
+  ProfileFeedback: undefined;
+  MoodCheckin: {
+    todayISO: string;
+  };
+  StreakWelcome: {
+    todayISO: string;
+    streakCount: number;
+    lastCompletedDateISO: string | null;
+    greeting: string;
+  };
 };
 
 export type OnboardingStackParamList = {

@@ -56,7 +56,7 @@ export function OnboardingShell({
       }
       return Math.min(Math.max(progress.section.current / progress.section.total, 0), 1);
     });
-  }, [progress?.section?.index, progress?.section?.current, progress?.section?.total]);
+  }, [progress]);
 
   const content = scroll ? (
     <ScrollView
